@@ -5,7 +5,6 @@ description = "MCP server for UiPath Orchestrator"
 authors = [
     {name = "Adam Stuber", email = "adamstuber@gmail.com"}
 ]
-readme = "README.md"
 requires-python = ">=3.12,<4.0"
 dependencies = [
     "mcp[cli] (>=1.0.0)",
