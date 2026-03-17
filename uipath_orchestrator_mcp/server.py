@@ -455,7 +455,10 @@ def get_asset(folder_name: str, asset_name: str) -> list[dict]:
 
 
 def main():
-    mcp.run()
+    # stdio  — MCP client spawns this process directly (default, local use)
+    # sse    — server listens on a port, clients connect over HTTP (Docker / remote)
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":
