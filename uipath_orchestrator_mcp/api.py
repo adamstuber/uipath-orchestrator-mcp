@@ -1,8 +1,11 @@
-import requests
+import json
 import concurrent.futures
 import time
 import os
 from datetime import datetime
+from math import ceil
+
+import requests
 
 
 def format_date(date: datetime) -> str:
@@ -43,22 +46,33 @@ class UiPathOrchestratorClient:
         self.access_token = None
         self.expires_in = None
         self.scopes = scopes
+        # Persistent session for connection pooling
+        self._session = requests.Session()
+        # Cache folder name → ID to avoid redundant GET /Folders calls
+        self._folder_cache: dict[str, int] = {}
 
     def get_access_token(self):
         auth_url = f"{self.cloud_url}/identity_/connect/token"
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
         data = {
             "grant_type": "client_credentials",
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "scope": self.scopes,
         }
-        response = requests.post(auth_url, headers=headers, data=data)
+        response = requests.post(
+            auth_url,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data=data,
+        )
         if response.status_code == 200:
             token_data = response.json()
             self.access_token = token_data["access_token"]
             self.expires_in = token_data["expires_in"]
             self.access_token_retrieved_time = datetime.now()
+            # Update session so all future requests carry the new token
+            self._session.headers.update(
+                {"Authorization": f"Bearer {self.access_token}"}
+            )
         else:
             raise Exception(
                 f"Failed to get access token: {response.status_code} - {response.text}"
@@ -67,7 +81,7 @@ class UiPathOrchestratorClient:
     def check_access_token(self):
         if self.access_token is None or (
             datetime.now() - self.access_token_retrieved_time
-        ).seconds > self.expires_in:
+        ).total_seconds() > self.expires_in:
             self.get_access_token()
 
     def _make_request(
@@ -80,22 +94,19 @@ class UiPathOrchestratorClient:
         max_retries=5,
         backoff_base=5,
     ):
-        """
-        Make a request with built-in retry and exponential backoff for rate limits.
-        """
+        """Make a request with retry and exponential backoff for rate limits."""
         self.check_access_token()
         url = f"{self.base_url}{endpoint}"
-        headers = headers or {}
-        headers["Authorization"] = f"Bearer {self.access_token}"
+        req_headers = headers or {}
 
         for attempt in range(max_retries):
-            if data and headers.get("Content-Type") == "application/json":
-                response = requests.request(
-                    method, url, params=params, headers=headers, json=data
+            if data and req_headers.get("Content-Type") == "application/json":
+                response = self._session.request(
+                    method, url, params=params, headers=req_headers, json=data
                 )
             else:
-                response = requests.request(
-                    method, url, params=params, headers=headers, data=data
+                response = self._session.request(
+                    method, url, params=params, headers=req_headers, data=data
                 )
 
             if response.status_code in [200, 201]:
@@ -109,14 +120,34 @@ class UiPathOrchestratorClient:
                 )
                 time.sleep(wait_time)
             elif response.status_code in [502, 503, 504]:
-                wait_time = backoff_base * (2**attempt)
-                time.sleep(wait_time)
+                time.sleep(backoff_base * (2**attempt))
             else:
                 raise Exception(
                     f"API request failed: {response.status_code} - {response.text}"
                 )
 
         raise Exception(f"Max retries exceeded for request to {endpoint}")
+
+    def _get_count(
+        self, resource: str, folder_id: int, filter_query: str = None
+    ) -> int:
+        """
+        Return the total item count for a resource using the OData $count endpoint.
+        Returns 0 on failure so callers can degrade gracefully.
+        """
+        self.check_access_token()
+        endpoint = f"/{resource}/$count"
+        if filter_query:
+            endpoint = f"{endpoint}?$filter={filter_query}"
+        url = f"{self.base_url}{endpoint}"
+        headers = {"X-UIPATH-OrganizationUnitId": str(folder_id)}
+        response = self._session.get(url, headers=headers)
+        if response.status_code == 200:
+            try:
+                return int(response.text.strip())
+            except ValueError:
+                return 0
+        return 0
 
 
 class UiPathFolderClient(UiPathOrchestratorClient):
@@ -127,16 +158,18 @@ class UiPathFolderClient(UiPathOrchestratorClient):
 
     def get_orchestrator_folders(self):
         """Retrieve all folders from UiPath Orchestrator."""
-        return self._make_request("GET", "/Folders")
-
-    def get_folder_id_by_name(self, folder_name: str) -> int | None:
-        """Get the folder ID by its display name."""
-        folders = self.get_orchestrator_folders()
+        folders = self._make_request("GET", "/Folders")
+        # Opportunistically populate cache whenever we fetch the full list
         if folders:
             for folder in folders:
-                if folder["DisplayName"] == folder_name:
-                    return folder["Id"]
-        return None
+                self._folder_cache[folder["DisplayName"]] = folder["Id"]
+        return folders
+
+    def get_folder_id_by_name(self, folder_name: str) -> int | None:
+        """Get the folder ID by its display name (cached)."""
+        if folder_name not in self._folder_cache:
+            self.get_orchestrator_folders()
+        return self._folder_cache.get(folder_name)
 
 
 class UiPathQueueClient(UiPathFolderClient):
@@ -156,6 +189,36 @@ class UiPathQueueClient(UiPathFolderClient):
         if folder_id is not None:
             return self.get_queue_definitions_by_folder_id(folder_id)
         return None
+
+    def _resolve_queue_filter(
+        self, folder_id: int, queue_name: str, filter_query: str = None
+    ) -> str:
+        """Append a QueueDefinitionId filter for the named queue."""
+        queue_definitions = self.get_queue_definitions_by_folder_id(folder_id)
+        queue_id = next(
+            (q["Id"] for q in queue_definitions if q["Name"] == queue_name), None
+        )
+        if queue_id is None:
+            raise ValueError(f"Queue '{queue_name}' not found in folder.")
+        queue_filter = f"QueueDefinitionId eq {queue_id}"
+        return f"{filter_query} and {queue_filter}" if filter_query else queue_filter
+
+    def count_queue_items(
+        self, folder_name: str, queue_name: str = None, filter_query: str = None
+    ) -> int:
+        """
+        Return the total number of queue items matching the given criteria.
+
+        :param folder_name: The display name of the folder.
+        :param queue_name: Optional queue name to scope the count.
+        :param filter_query: Optional additional OData filter string.
+        """
+        folder_id = self.get_folder_id_by_name(folder_name)
+        if folder_id is None:
+            raise ValueError(f"Folder '{folder_name}' not found.")
+        if queue_name:
+            filter_query = self._resolve_queue_filter(folder_id, queue_name, filter_query)
+        return self._get_count("QueueItems", folder_id, filter_query)
 
     def get_queue_items_by_folder_id(
         self, folder_id: int, batch_size=100, skip=0, filter_query=None
@@ -179,18 +242,8 @@ class UiPathQueueClient(UiPathFolderClient):
         folder_id = self.get_folder_id_by_name(folder_name)
         if folder_id is None:
             return None
-
         if queue_name is not None:
-            queue_definitions = self.get_queue_definitions_by_folder_id(folder_id)
-            queue_id = next(
-                (q["Id"] for q in queue_definitions if q["Name"] == queue_name), None
-            )
-            if queue_id is not None:
-                queue_filter = f"QueueDefinitionId eq {queue_id}"
-                filter_query = (
-                    f"{filter_query} and {queue_filter}" if filter_query else queue_filter
-                )
-
+            filter_query = self._resolve_queue_filter(folder_id, queue_name, filter_query)
         return self.get_queue_items_by_folder_id(
             folder_id, batch_size, skip, filter_query
         )
@@ -201,26 +254,23 @@ class UiPathQueueClient(UiPathFolderClient):
         queue_name: str,
         batch_size=100,
         filter_query=None,
-        max_items=1000,
         max_workers=10,
     ):
-        """Retrieve all queue items for a specific queue using concurrent requests."""
+        """
+        Retrieve all queue items for a queue using $count + concurrent page fetches.
+
+        Uses the actual item count so no wasted requests are made.
+        """
         folder_id = self.get_folder_id_by_name(folder_name)
         if folder_id is None:
             return None
+        filter_query = self._resolve_queue_filter(folder_id, queue_name, filter_query)
 
-        queue_definitions = self.get_queue_definitions_by_folder_id(folder_id)
-        queue_id = next(
-            (q["Id"] for q in queue_definitions if q["Name"] == queue_name), None
-        )
-        if queue_id is None:
-            return None
+        total = self._get_count("QueueItems", folder_id, filter_query)
+        if total == 0:
+            return []
 
-        queue_filter = f"QueueDefinitionId eq {queue_id}"
-        filter_query = (
-            f"{filter_query} and {queue_filter}" if filter_query else queue_filter
-        )
-
+        pages = ceil(total / batch_size)
         all_items = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -228,10 +278,10 @@ class UiPathQueueClient(UiPathFolderClient):
                     self.get_queue_items_by_folder_id,
                     folder_id,
                     batch_size,
-                    skip,
+                    page * batch_size,
                     filter_query,
                 )
-                for skip in range(0, max_items, batch_size)
+                for page in range(pages)
             ]
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
@@ -268,7 +318,6 @@ class UiPathQueueClient(UiPathFolderClient):
             "X-UIPATH-OrganizationUnitId": str(folder_id),
             "Content-Type": "application/json",
         }
-
         item_data: dict = {
             "Name": queue_name,
             "Priority": priority,
@@ -281,10 +330,64 @@ class UiPathQueueClient(UiPathFolderClient):
         if reference:
             item_data["Reference"] = reference
 
-        data = {"itemData": item_data}
         return self._make_request(
             "POST",
             "/Queues/UiPath.Server.Configuration.OData.AddQueueItem",
+            headers=headers,
+            data={"itemData": item_data},
+        )
+
+    def bulk_add_queue_items(
+        self,
+        folder_name: str,
+        queue_name: str,
+        items: list[dict],
+        commit_type: str = "AllOrNothing",
+    ):
+        """
+        Add multiple queue items in a single API call.
+
+        :param folder_name: The folder containing the queue.
+        :param queue_name: The name of the queue.
+        :param items: List of item dicts. Each dict may contain:
+            - specific_content (dict, required)
+            - priority (str, optional) — 'Low', 'Normal', or 'High'
+            - reference (str, optional)
+            - defer_date (datetime, optional)
+            - due_date (datetime, optional)
+        :param commit_type: 'AllOrNothing' (default) — rolls back all on any failure;
+                            'ProcessAllIndependently' — commits each item individually.
+        """
+        folder_id = self.get_folder_id_by_name(folder_name)
+        if folder_id is None:
+            raise ValueError(f"Folder '{folder_name}' not found.")
+
+        headers = {
+            "X-UIPATH-OrganizationUnitId": str(folder_id),
+            "Content-Type": "application/json",
+        }
+
+        def _build_item(item: dict) -> dict:
+            req: dict = {
+                "priority": item.get("priority", "Normal"),
+                "specificContent": item["specific_content"],
+            }
+            if "reference" in item:
+                req["reference"] = item["reference"]
+            if "defer_date" in item:
+                req["deferDate"] = format_date(item["defer_date"])
+            if "due_date" in item:
+                req["dueDate"] = format_date(item["due_date"])
+            return req
+
+        data = {
+            "commitType": commit_type,
+            "queueName": queue_name,
+            "queueItemRequests": [_build_item(i) for i in items],
+        }
+        return self._make_request(
+            "POST",
+            "/Queues/UiPath.Server.Configuration.OData.BulkAddQueueItems",
             headers=headers,
             data=data,
         )
@@ -358,7 +461,7 @@ class UiPathQueueClient(UiPathFolderClient):
 
 
 class UiPathJobsClient(UiPathQueueClient):
-    """Client for interacting with UiPath Orchestrator jobs, releases, robots, machines, and assets."""
+    """Client for UiPath Orchestrator jobs, releases, schedules, robots, machines, and assets."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -423,14 +526,23 @@ class UiPathJobsClient(UiPathQueueClient):
         folder_name: str,
         batch_size=100,
         filter_query=None,
-        max_items=10000,
         max_workers=10,
         **kwargs,
     ):
-        """Retrieve all jobs for a folder using concurrent requests."""
+        """
+        Retrieve all jobs for a folder using $count + concurrent page fetches.
+
+        Uses the actual job count so no wasted requests are made.
+        """
         if not filter_query:
             filter_query = self._build_odata_filter(**kwargs)
         folder_id = self.get_folder_id_by_name(folder_name)
+
+        total = self._get_count("Jobs", folder_id, filter_query)
+        if total == 0:
+            return []
+
+        pages = ceil(total / batch_size)
         all_jobs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -438,10 +550,10 @@ class UiPathJobsClient(UiPathQueueClient):
                     self.get_jobs_by_folder_id,
                     folder_id,
                     batch_size,
-                    skip,
+                    page * batch_size,
                     filter_query,
                 )
-                for skip in range(0, max_items, batch_size)
+                for page in range(pages)
             ]
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
@@ -453,7 +565,6 @@ class UiPathJobsClient(UiPathQueueClient):
         self,
         batch_size=100,
         filter_query=None,
-        max_items=100,
         max_workers=10,
         **kwargs,
     ):
@@ -464,7 +575,7 @@ class UiPathJobsClient(UiPathQueueClient):
         folders = self.get_orchestrator_folders()
         for folder in folders:
             folder_jobs = self.get_all_jobs_for_folder(
-                folder["DisplayName"], batch_size, filter_query, max_items, max_workers
+                folder["DisplayName"], batch_size, filter_query, max_workers
             )
             if folder_jobs:
                 all_jobs.extend(folder_jobs)
@@ -475,6 +586,41 @@ class UiPathJobsClient(UiPathQueueClient):
         folder_id = self.get_folder_id_by_name(folder_name)
         headers = {"X-UIPATH-OrganizationUnitId": str(folder_id)}
         return self._make_request("GET", f"/Jobs({job_id})", headers=headers)
+
+    def get_job_logs(
+        self,
+        job_id: int,
+        folder_name: str,
+        batch_size=100,
+        skip=0,
+        min_level: str = None,
+    ):
+        """
+        Retrieve robot execution logs for a specific job.
+
+        :param job_id: The ID of the job.
+        :param folder_name: The folder containing the job.
+        :param batch_size: Number of log entries to return (default 100).
+        :param skip: Number of entries to skip for pagination.
+        :param min_level: Optional minimum log level to filter by —
+                          'Trace', 'Info', 'Warn', 'Error', 'Fatal'.
+        """
+        folder_id = self.get_folder_id_by_name(folder_name)
+        if folder_id is None:
+            raise ValueError(f"Folder '{folder_name}' not found.")
+
+        headers = {"X-UIPATH-OrganizationUnitId": str(folder_id)}
+        filter_parts = [f"JobKey eq guid'{job_id}'"]
+        if min_level:
+            level_order = ["Trace", "Info", "Warn", "Error", "Fatal"]
+            if min_level in level_order:
+                allowed = level_order[level_order.index(min_level):]
+                level_filter = " or ".join(f"Level eq '{lvl}'" for lvl in allowed)
+                filter_parts.append(f"({level_filter})")
+
+        filter_query = " and ".join(filter_parts)
+        endpoint = f"/RobotLogs?$top={batch_size}&$skip={skip}&$filter={filter_query}&$orderby=TimeStamp asc"
+        return self._make_request("GET", endpoint, headers=headers)
 
     def start_job(
         self,
@@ -525,25 +671,21 @@ class UiPathJobsClient(UiPathQueueClient):
             "X-UIPATH-OrganizationUnitId": str(folder_id),
             "Content-Type": "application/json",
         }
-
-        import json as _json
-
         start_info: dict = {
             "ReleaseKey": release_key,
             "Strategy": strategy,
-            "InputArguments": _json.dumps(input_arguments) if input_arguments else "{}",
+            "InputArguments": json.dumps(input_arguments) if input_arguments else "{}",
         }
         if strategy == "Specific" and robot_ids:
             start_info["RobotIds"] = robot_ids
         elif strategy == "JobsCount":
             start_info["JobsCount"] = jobs_count
 
-        data = {"startInfo": start_info}
         return self._make_request(
             "POST",
             "/Jobs/UiPath.Server.Configuration.OData.StartJobs",
             headers=headers,
-            data=data,
+            data={"startInfo": start_info},
         )
 
     def stop_job(
@@ -567,12 +709,11 @@ class UiPathJobsClient(UiPathQueueClient):
             "X-UIPATH-OrganizationUnitId": str(folder_id),
             "Content-Type": "application/json",
         }
-        data = {"strategy": strategy}
         return self._make_request(
             "POST",
             f"/Jobs({job_id})/UiPath.Server.Configuration.OData.StopJob",
             headers=headers,
-            data=data,
+            data={"strategy": strategy},
         )
 
     def get_releases(self, folder_id: int):
@@ -587,10 +728,52 @@ class UiPathJobsClient(UiPathQueueClient):
             return self.get_releases(folder_id)
         return None
 
+    # ------------------------------------------------------------------
+    # Process schedules / triggers
+    # ------------------------------------------------------------------
+
+    def get_process_schedules(self, folder_name: str):
+        """
+        Retrieve all process schedules (triggers) in a folder.
+
+        :param folder_name: The display name of the folder.
+        """
+        folder_id = self.get_folder_id_by_name(folder_name)
+        if folder_id is None:
+            raise ValueError(f"Folder '{folder_name}' not found.")
+        headers = {"X-UIPATH-OrganizationUnitId": str(folder_id)}
+        return self._make_request("GET", "/ProcessSchedules", headers=headers)
+
+    def set_schedule_enabled(
+        self, schedule_id: int, folder_name: str, enabled: bool
+    ):
+        """
+        Enable or disable a process schedule.
+
+        :param schedule_id: The ID of the schedule to toggle.
+        :param folder_name: The folder containing the schedule.
+        :param enabled: True to enable, False to disable.
+        """
+        folder_id = self.get_folder_id_by_name(folder_name)
+        if folder_id is None:
+            raise ValueError(f"Folder '{folder_name}' not found.")
+        headers = {
+            "X-UIPATH-OrganizationUnitId": str(folder_id),
+            "Content-Type": "application/json",
+        }
+        return self._make_request(
+            "POST",
+            f"/ProcessSchedules({schedule_id})/UiPath.Server.Configuration.OData.SetEnabled",
+            headers=headers,
+            data={"enabled": enabled},
+        )
+
+    # ------------------------------------------------------------------
+    # Robots, machines, assets
+    # ------------------------------------------------------------------
+
     def get_robots(self, folder_name: str = None):
-        """
-        Retrieve robots. If folder_name is provided, scoped to that folder.
-        """
+        """Retrieve robots, optionally scoped to a folder."""
         headers = {}
         if folder_name:
             folder_id = self.get_folder_id_by_name(folder_name)
@@ -599,9 +782,7 @@ class UiPathJobsClient(UiPathQueueClient):
         return self._make_request("GET", "/Robots", headers=headers)
 
     def get_machines(self, folder_name: str = None):
-        """
-        Retrieve machines. If folder_name is provided, scoped to that folder.
-        """
+        """Retrieve machines, optionally scoped to a folder."""
         headers = {}
         if folder_name:
             folder_id = self.get_folder_id_by_name(folder_name)
@@ -623,5 +804,6 @@ class UiPathJobsClient(UiPathQueueClient):
         if folder_id is None:
             raise ValueError(f"Folder '{folder_name}' not found.")
         headers = {"X-UIPATH-OrganizationUnitId": str(folder_id)}
-        endpoint = f"/Assets?$filter=Name eq '{asset_name}'"
-        return self._make_request("GET", endpoint, headers=headers)
+        return self._make_request(
+            "GET", f"/Assets?$filter=Name eq '{asset_name}'", headers=headers
+        )

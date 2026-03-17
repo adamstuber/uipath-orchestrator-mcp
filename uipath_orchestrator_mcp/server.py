@@ -273,6 +273,27 @@ def stop_job(
 
 
 @mcp.tool()
+def get_job_logs(
+    job_id: int,
+    folder_name: str,
+    batch_size: int = 100,
+    skip: int = 0,
+    min_level: Optional[str] = None,
+) -> list[dict]:
+    """
+    Retrieve robot execution logs for a job.
+
+    Args:
+        job_id: The ID of the job.
+        folder_name: The display name of the folder containing the job.
+        batch_size: Number of log entries to return (default 100).
+        skip: Number of entries to skip for pagination.
+        min_level: Minimum log level to return — 'Trace', 'Info', 'Warn', 'Error', or 'Fatal'.
+    """
+    return _get_client().get_job_logs(job_id, folder_name, batch_size, skip, min_level)
+
+
+@mcp.tool()
 def list_releases(folder_name: str) -> list[dict]:
     """
     List all releases (deployed processes) in a folder.
@@ -281,6 +302,96 @@ def list_releases(folder_name: str) -> list[dict]:
         folder_name: The display name of the folder.
     """
     return _get_client().get_releases_by_folder_name(folder_name)
+
+
+# ---------------------------------------------------------------------------
+# Queue bulk operations
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def count_queue_items(
+    folder_name: str,
+    queue_name: Optional[str] = None,
+    filter_query: Optional[str] = None,
+) -> int:
+    """
+    Return the total number of queue items matching the given criteria.
+
+    Args:
+        folder_name: The display name of the folder.
+        queue_name: Optional queue name to scope the count.
+        filter_query: Optional OData filter string (e.g. "Status eq 'Failed'").
+    """
+    return _get_client().count_queue_items(folder_name, queue_name, filter_query)
+
+
+@mcp.tool()
+def bulk_add_queue_items(
+    folder_name: str,
+    queue_name: str,
+    items: list[dict],
+    commit_type: str = "AllOrNothing",
+) -> dict:
+    """
+    Add multiple items to a queue in a single API call.
+
+    Args:
+        folder_name: The display name of the folder.
+        queue_name: The name of the queue.
+        items: List of item objects. Each item may contain:
+            - specific_content (dict, required) — the data payload
+            - priority (str, optional) — 'Low', 'Normal', or 'High'
+            - reference (str, optional) — tracking reference
+        commit_type: 'AllOrNothing' (default) — rolls back everything if any item fails;
+                     'ProcessAllIndependently' — commits each item individually.
+    """
+    return _get_client().bulk_add_queue_items(
+        folder_name=folder_name,
+        queue_name=queue_name,
+        items=items,
+        commit_type=commit_type,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Schedule / Trigger tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def list_schedules(folder_name: str) -> list[dict]:
+    """
+    List all process schedules (triggers) in a folder.
+
+    Args:
+        folder_name: The display name of the folder.
+    """
+    return _get_client().get_process_schedules(folder_name)
+
+
+@mcp.tool()
+def enable_schedule(schedule_id: int, folder_name: str) -> dict:
+    """
+    Enable a process schedule.
+
+    Args:
+        schedule_id: The ID of the schedule to enable.
+        folder_name: The display name of the folder containing the schedule.
+    """
+    return _get_client().set_schedule_enabled(schedule_id, folder_name, enabled=True)
+
+
+@mcp.tool()
+def disable_schedule(schedule_id: int, folder_name: str) -> dict:
+    """
+    Disable a process schedule.
+
+    Args:
+        schedule_id: The ID of the schedule to disable.
+        folder_name: The display name of the folder containing the schedule.
+    """
+    return _get_client().set_schedule_enabled(schedule_id, folder_name, enabled=False)
 
 
 # ---------------------------------------------------------------------------
