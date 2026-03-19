@@ -6,5 +6,5 @@ services:
     env_file:
       - .env
     environment:
-      MCP_TRANSPORT: sse
+      MCP_TRANSPORT: streamable-http
     restart: unless-stopped

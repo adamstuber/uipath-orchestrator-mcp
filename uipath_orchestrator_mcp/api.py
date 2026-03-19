@@ -6,7 +6,8 @@ from datetime import datetime
 from math import ceil
 
 import requests
-
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
 
 def format_date(date: datetime) -> str:
     """Format a datetime object to ISO 8601 OData format."""
@@ -133,21 +134,36 @@ class UiPathOrchestratorClient:
     ) -> int:
         """
         Return the total item count for a resource using the OData $count endpoint.
-        Returns 0 on failure so callers can degrade gracefully.
+        Raises an exception on any failure rather than returning 0.
         """
         self.check_access_token()
-        endpoint = f"/{resource}/$count"
+        endpoint = f"/{resource}?$count=true"
+
         if filter_query:
-            endpoint = f"{endpoint}?$filter={filter_query}"
+            endpoint = f"{endpoint}&$filter={filter_query}"
         url = f"{self.base_url}{endpoint}"
+        print(f"Full url for count request: {url}")
+        
         headers = {"X-UIPATH-OrganizationUnitId": str(folder_id)}
         response = self._session.get(url, headers=headers)
-        if response.status_code == 200:
-            try:
-                return int(response.text.strip())
-            except ValueError:
-                return 0
-        return 0
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Count request to {endpoint} failed with status {response.status_code}: {response.text}"
+            )
+
+        try:
+            json_response = response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse JSON response from {endpoint}: {e}")
+
+        if "@odata.count" not in json_response:
+            raise KeyError(
+                f"'@odata.count' not in response from {endpoint}. "
+                f"Got keys: {list(json_response.keys())}"
+            )
+
+        return int(json_response["@odata.count"])
 
 
 class UiPathFolderClient(UiPathOrchestratorClient):
@@ -163,10 +179,15 @@ class UiPathFolderClient(UiPathOrchestratorClient):
         if folders:
             for folder in folders:
                 self._folder_cache[folder["DisplayName"]] = folder["Id"]
+                # Also index by FullyQualifiedName so callers can pass hierarchical
+                # paths like "BillingGreenLantern/Backup" and resolve correctly.
+                fqn = folder.get("FullyQualifiedName")
+                if fqn and fqn != folder["DisplayName"]:
+                    self._folder_cache[fqn] = folder["Id"]
         return folders
 
     def get_folder_id_by_name(self, folder_name: str) -> int | None:
-        """Get the folder ID by its display name (cached)."""
+        """Get the folder ID by its display name or fully-qualified path (cached)."""
         if folder_name not in self._folder_cache:
             self.get_orchestrator_folders()
         return self._folder_cache.get(folder_name)
@@ -472,7 +493,8 @@ class UiPathJobsClient(UiPathQueueClient):
         start_time: datetime = None,
         end_time: datetime = None,
         state: str = None,
-        job_priority: str = None,
+        release_name: str = None,
+        job_priority: str = None
     ) -> str:
         """Build an OData filter string from the provided parameters."""
         filters = []
@@ -486,6 +508,8 @@ class UiPathJobsClient(UiPathQueueClient):
             filters.append(f"State eq '{state}'")
         if job_priority:
             filters.append(f"Priority eq '{job_priority}'")
+        if release_name:
+            filters.append(f"ReleaseName eq '{release_name}'")
         return " and ".join(filters)
 
     def get_jobs_by_folder_id(
@@ -517,9 +541,12 @@ class UiPathJobsClient(UiPathQueueClient):
         if not filter_query:
             filter_query = self._build_odata_filter(**kwargs)
         folder_id = self.get_folder_id_by_name(folder_name)
-        if folder_id is not None:
-            return self.get_jobs_by_folder_id(folder_id, batch_size, skip, filter_query)
-        return None
+        if folder_id is None:
+            raise ValueError(
+                f"Folder '{folder_name}' not found. "
+                "Use list_folders() to see available folder names and paths."
+            )
+        return self.get_jobs_by_folder_id(folder_id, batch_size, skip, filter_query)
 
     def get_all_jobs_for_folder(
         self,
@@ -724,9 +751,12 @@ class UiPathJobsClient(UiPathQueueClient):
     def get_releases_by_folder_name(self, folder_name: str):
         """Retrieve releases (processes) by folder name."""
         folder_id = self.get_folder_id_by_name(folder_name)
-        if folder_id is not None:
-            return self.get_releases(folder_id)
-        return None
+        if folder_id is None:
+            raise ValueError(
+                f"Folder '{folder_name}' not found. "
+                "Use list_folders() to see available folder names and paths."
+            )
+        return self.get_releases(folder_id)
 
     # ------------------------------------------------------------------
     # Process schedules / triggers
@@ -807,3 +837,21 @@ class UiPathJobsClient(UiPathQueueClient):
         return self._make_request(
             "GET", f"/Assets?$filter=Name eq '{asset_name}'", headers=headers
         )
+
+
+if __name__ == "__main__":
+    
+    from dotenv import load_dotenv
+    load_dotenv()  # Load environment variables from .env file
+    client = UiPathJobsClient()
+
+    folder_name = "BillingGreenLantern/Backup"
+    print(f"\nQueue definitions in folder '{folder_name}':")
+    queue_defs = client.get_queue_definitions_by_folder_name(folder_name)
+    print(queue_defs)
+
+    if queue_defs:
+        queue_name = queue_defs[2]["Name"]
+        print(f"\nCounting items in queue '{queue_name}'...")
+        count = client.count_queue_items(folder_name, queue_name)
+        print(f"Total items in queue '{queue_name}': {count}")
