@@ -13,6 +13,7 @@ RUN poetry config virtualenvs.create false \
     && poetry install --only=main --no-root --no-interaction
 
 # Copy source and install the package
+COPY README.md ./
 COPY uipath_orchestrator_mcp/ ./uipath_orchestrator_mcp/
 RUN poetry install --only=main --no-interaction
 

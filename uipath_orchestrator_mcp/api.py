@@ -22,7 +22,7 @@ TENANT_NAME = os.getenv("UIPATH_TENANT_NAME")
 ORG_NAME = os.getenv("UIPATH_ORG_NAME")
 SCOPES = os.getenv(
     "UIPATH_SCOPES",
-    "OR.Jobs OR.Folders OR.Queues OR.Robots OR.Execution OR.Machines OR.Assets",
+    "OR.Jobs OR.Folders OR.Queues OR.Robots OR.Execution OR.Machines OR.Assets OR.Audit OR.Monitoring",
 )
 
 
@@ -242,13 +242,15 @@ class UiPathQueueClient(UiPathFolderClient):
         return self._get_count("QueueItems", folder_id, filter_query)
 
     def get_queue_items_by_folder_id(
-        self, folder_id: int, batch_size=100, skip=0, filter_query=None
+        self, folder_id: int, batch_size=100, skip=0, filter_query=None, order_desc=False
     ):
         """Retrieve queue items by folder ID with optional OData filtering."""
         headers = {"X-UIPATH-OrganizationUnitId": str(folder_id)}
         endpoint = f"/QueueItems?$top={batch_size}&$skip={skip}"
         if filter_query:
             endpoint = f"{endpoint}&$filter={filter_query}"
+        if order_desc:
+            endpoint = f"{endpoint}&$orderby=CreationTime desc"
         return self._make_request("GET", endpoint, headers=headers)
 
     def get_queue_item_batch(
@@ -258,6 +260,7 @@ class UiPathQueueClient(UiPathFolderClient):
         batch_size=100,
         skip=0,
         filter_query=None,
+        order_desc=False,
     ):
         """Retrieve a batch of queue items by folder name, optionally filtered by queue."""
         folder_id = self.get_folder_id_by_name(folder_name)
@@ -266,7 +269,7 @@ class UiPathQueueClient(UiPathFolderClient):
         if queue_name is not None:
             filter_query = self._resolve_queue_filter(folder_id, queue_name, filter_query)
         return self.get_queue_items_by_folder_id(
-            folder_id, batch_size, skip, filter_query
+            folder_id, batch_size, skip, filter_query, order_desc
         )
 
     def get_all_queue_items(
@@ -494,7 +497,8 @@ class UiPathJobsClient(UiPathQueueClient):
         end_time: datetime = None,
         state: str = None,
         release_name: str = None,
-        job_priority: str = None
+        job_priority: str = None,
+        source: str = None,
     ) -> str:
         """Build an OData filter string from the provided parameters."""
         filters = []
@@ -510,6 +514,8 @@ class UiPathJobsClient(UiPathQueueClient):
             filters.append(f"Priority eq '{job_priority}'")
         if release_name:
             filters.append(f"ReleaseName eq '{release_name}'")
+        if source:
+            filters.append(f"Source eq '{source}'")
         return " and ".join(filters)
 
     def get_jobs_by_folder_id(
@@ -518,6 +524,7 @@ class UiPathJobsClient(UiPathQueueClient):
         batch_size=100,
         skip=0,
         filter_query=None,
+        order_desc=False,
         **kwargs,
     ):
         """Retrieve jobs by folder ID with optional OData filtering."""
@@ -527,6 +534,8 @@ class UiPathJobsClient(UiPathQueueClient):
         endpoint = f"/Jobs?$top={batch_size}&$skip={skip}"
         if filter_query:
             endpoint = f"{endpoint}&$filter={filter_query}"
+        if order_desc:
+            endpoint = f"{endpoint}&$orderby=StartTime desc"
         return self._make_request("GET", endpoint, headers=headers)
 
     def get_job_batch_by_folder_name(
@@ -535,6 +544,7 @@ class UiPathJobsClient(UiPathQueueClient):
         batch_size=100,
         skip=0,
         filter_query=None,
+        order_desc=False,
         **kwargs,
     ):
         """Retrieve a batch of jobs by folder name."""
@@ -546,7 +556,7 @@ class UiPathJobsClient(UiPathQueueClient):
                 f"Folder '{folder_name}' not found. "
                 "Use list_folders() to see available folder names and paths."
             )
-        return self.get_jobs_by_folder_id(folder_id, batch_size, skip, filter_query)
+        return self.get_jobs_by_folder_id(folder_id, batch_size, skip, filter_query, order_desc)
 
     def get_all_jobs_for_folder(
         self,
@@ -621,6 +631,10 @@ class UiPathJobsClient(UiPathQueueClient):
         batch_size=100,
         skip=0,
         min_level: str = None,
+        log_levels: list[str] = None,
+        start_time: datetime = None,
+        end_time: datetime = None,
+        order_desc: bool = False,
     ):
         """
         Retrieve robot execution logs for a specific job.
@@ -629,24 +643,44 @@ class UiPathJobsClient(UiPathQueueClient):
         :param folder_name: The folder containing the job.
         :param batch_size: Number of log entries to return (default 100).
         :param skip: Number of entries to skip for pagination.
-        :param min_level: Optional minimum log level to filter by —
-                          'Trace', 'Info', 'Warn', 'Error', 'Fatal'.
+        :param min_level: Minimum log level — 'Trace', 'Info', 'Warn', 'Error', 'Fatal'.
+                          Ignored if log_levels is provided.
+        :param log_levels: Exact set of levels to include, e.g. ['Error', 'Fatal'].
+                           Takes priority over min_level.
+        :param start_time: Return logs at or after this datetime.
+        :param end_time: Return logs at or before this datetime.
+        :param order_desc: If True, return newest entries first (useful for tail fetches).
         """
         folder_id = self.get_folder_id_by_name(folder_name)
         if folder_id is None:
             raise ValueError(f"Folder '{folder_name}' not found.")
 
+        job = self.get_job_by_id(job_id, folder_name)
+        job_key = job.get("Key")
+        if not job_key:
+            raise ValueError(f"Could not retrieve Key for job {job_id}.")
+
         headers = {"X-UIPATH-OrganizationUnitId": str(folder_id)}
-        filter_parts = [f"JobKey eq guid'{job_id}'"]
-        if min_level:
+        filter_parts = [f"JobKey eq {job_key}"]
+
+        if log_levels:
+            level_filter = " or ".join(f"Level eq '{lvl}'" for lvl in log_levels)
+            filter_parts.append(f"({level_filter})")
+        elif min_level:
             level_order = ["Trace", "Info", "Warn", "Error", "Fatal"]
             if min_level in level_order:
                 allowed = level_order[level_order.index(min_level):]
                 level_filter = " or ".join(f"Level eq '{lvl}'" for lvl in allowed)
                 filter_parts.append(f"({level_filter})")
 
+        if start_time:
+            filter_parts.append(f"TimeStamp ge {format_date(start_time)}")
+        if end_time:
+            filter_parts.append(f"TimeStamp le {format_date(end_time)}")
+
         filter_query = " and ".join(filter_parts)
-        endpoint = f"/RobotLogs?$top={batch_size}&$skip={skip}&$filter={filter_query}&$orderby=TimeStamp asc"
+        order = "TimeStamp desc" if order_desc else "TimeStamp asc"
+        endpoint = f"/RobotLogs?$top={batch_size}&$skip={skip}&$filter={filter_query}&$orderby={order}"
         return self._make_request("GET", endpoint, headers=headers)
 
     def start_job(
