@@ -124,7 +124,7 @@ class UiPathOrchestratorClient:
                 time.sleep(backoff_base * (2**attempt))
             else:
                 raise Exception(
-                    f"API request failed: {response.status_code} - {response.text}"
+                    f"API request failed: {response.status_code} - {response.text}\nURL: {response.url}\nResponse headers: {dict(response.headers)}"
                 )
 
         raise Exception(f"Max retries exceeded for request to {endpoint}")
@@ -223,6 +223,20 @@ class UiPathQueueClient(UiPathFolderClient):
             raise ValueError(f"Queue '{queue_name}' not found in folder.")
         queue_filter = f"QueueDefinitionId eq {queue_id}"
         return f"{filter_query} and {queue_filter}" if filter_query else queue_filter
+
+    @staticmethod
+    def _normalize_specific_content(specific_content: dict) -> dict:
+        """
+        UiPath queue item SpecificContent supports key-value pairs with simple values.
+        Convert nested values (dict/list) to JSON strings to satisfy API constraints.
+        """
+        normalized = {}
+        for key, value in specific_content.items():
+            if isinstance(value, (dict, list)):
+                normalized[key] = json.dumps(value)
+            else:
+                normalized[key] = value
+        return normalized
 
     def count_queue_items(
         self, folder_name: str, queue_name: str = None, filter_query: str = None
@@ -345,7 +359,7 @@ class UiPathQueueClient(UiPathFolderClient):
         item_data: dict = {
             "Name": queue_name,
             "Priority": priority,
-            "SpecificContent": specific_content,
+            "SpecificContent": self._normalize_specific_content(specific_content),
         }
         if defer_date:
             item_data["DeferDate"] = format_date(defer_date)
@@ -354,11 +368,12 @@ class UiPathQueueClient(UiPathFolderClient):
         if reference:
             item_data["Reference"] = reference
 
+        request_data = {"itemData": item_data}
         return self._make_request(
             "POST",
-            "/Queues/UiPath.Server.Configuration.OData.AddQueueItem",
+            "/Queues/UiPathODataSvc.AddQueueItem",
             headers=headers,
-            data={"itemData": item_data},
+            data=request_data,
         )
 
     def bulk_add_queue_items(
@@ -393,25 +408,27 @@ class UiPathQueueClient(UiPathFolderClient):
 
         def _build_item(item: dict) -> dict:
             req: dict = {
-                "priority": item.get("priority", "Normal"),
-                "specificContent": item["specific_content"],
+                "Priority": item.get("priority", "Normal"),
+                "SpecificContent": self._normalize_specific_content(
+                    item["specific_content"]
+                ),
             }
             if "reference" in item:
-                req["reference"] = item["reference"]
+                req["Reference"] = item["reference"]
             if "defer_date" in item:
-                req["deferDate"] = format_date(item["defer_date"])
+                req["DeferDate"] = format_date(item["defer_date"])
             if "due_date" in item:
-                req["dueDate"] = format_date(item["due_date"])
+                req["DueDate"] = format_date(item["due_date"])
             return req
 
         data = {
             "commitType": commit_type,
             "queueName": queue_name,
-            "queueItemRequests": [_build_item(i) for i in items],
+            "queueItems": [_build_item(i) for i in items],
         }
         return self._make_request(
             "POST",
-            "/Queues/UiPath.Server.Configuration.OData.BulkAddQueueItems",
+            "/Queues/UiPathODataSvc.BulkAddQueueItems",
             headers=headers,
             data=data,
         )
@@ -878,14 +895,1001 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()  # Load environment variables from .env file
     client = UiPathJobsClient()
+    import json
+    
+    json_data = """{
+  "project_number": "4174",
+  "project_name": "IT CUSTOMER EXPERIENCE",
+  "project_long_name": "IT CUSTOMER EXPERIENCE",
+  "project_organization": "BMC.M&S.WHQ.IT",
+  "project_description": null,
+  "project_type": "US ADMINISTRATION",
+  "project_start_date": "2026-03-01",
+  "project_end_date": "1950-12-31",
+  "key_members": [
+    {
+      "name": "Harmon, Matthew B. (Matt)",
+      "number": null,
+      "role": "Project Manager",
+      "effective_from_date": "2026-03-01",
+      "effective_to_date": null
+    }
+  ],
+  "classifications": [
+    {
+      "category": "AA_CWK_ACCT",
+      "class_code": "6437",
+      "code_description": "CWK Labor"
+    },
+    {
+      "category": "AA_ER_ACCT",
+      "class_code": null,
+      "code_description": "Not Applicable"
+    },
+    {
+      "category": "AA_ER_EXP_ORG",
+      "class_code": "EMPLOYEE",
+      "code_description": "See INDIR_ACCT_STRUCTURES auto-accounting lookup set"
+    },
+    {
+      "category": "AA_LABOR_EXP_ORG",
+      "class_code": "EMPLOYEE",
+      "code_description": "See INDIR_ACCT_STRUCTURES auto-accounting lookup set"
+    },
+    {
+      "category": "AA_MISC_ACCT",
+      "class_code": null,
+      "code_description": "Not Applicable"
+    },
+    {
+      "category": "AA_MISC_EXP_ORG",
+      "class_code": "EMPLOYEE",
+      "code_description": "See INDIR_ACCT_STRUCTURES auto-accounting lookup set"
+    },
+    {
+      "category": "AA_OT_ACCT",
+      "class_code": "6202",
+      "code_description": "Overtime Wages"
+    },
+    {
+      "category": "AA_PT_ACCT",
+      "class_code": "6203",
+      "code_description": "Premium Overtime Wages"
+    },
+    {
+      "category": "AA_SI_ACCT",
+      "class_code": null,
+      "code_description": "Not Applicable"
+    },
+    {
+      "category": "AA_SI_EXP_ORG",
+      "class_code": "ALL_TASKS",
+      "code_description": "See INDIR_ACCT_STRUCTURES auto-accounting lookup set"
+    },
+    {
+      "category": "AA_ST_ACCT",
+      "class_code": "6201",
+      "code_description": "Regular Wages"
+    }
+  ],
+  "work_breakdown_structure": [
+    {
+      "task_number": "COMPUTERS",
+      "task_name": "COMPUTERS",
+      "task_description": null,
+      "task_manager": "Harmon, Matthew B. (Matt)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 1,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": [
+        "COMPUTERS-2",
+        "COMPUTERS-3",
+        "COMPUTERS-4",
+        "COMPUTERS-5"
+      ]
+    },
+    {
+      "task_number": "COMPUTERS-2",
+      "task_name": "SERVICE MANAGEMENT",
+      "task_description": null,
+      "task_manager": "Massey, Christopher L. (Chris)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "BOTH",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "COMPUTERS-3",
+      "task_name": "CAPITAL EXPENSES",
+      "task_description": null,
+      "task_manager": "Massey, Christopher L. (Chris)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "BOTH",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.Office Admin",
+      "labor_override": 1720,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "COMPUTERS-4",
+      "task_name": "PREPAID OPEX",
+      "task_description": null,
+      "task_manager": "Massey, Christopher L. (Chris)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": 1451,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "COMPUTERS-5",
+      "task_name": "PROJECTS",
+      "task_description": null,
+      "task_manager": "Massey, Christopher L. (Chris)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "FLD SERV ADMIN",
+      "task_name": "FLD SERV ADMIN",
+      "task_description": null,
+      "task_manager": "Harmon, Matthew B. (Matt)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 1,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": [
+        "FLD SERV ADMIN-2",
+        "FLD SERV ADMIN-3",
+        "FLD SERV ADMIN-4",
+        "FLD SERV ADMIN-5"
+      ]
+    },
+    {
+      "task_number": "FLD SERV ADMIN-2",
+      "task_name": "SERVICE MANAGEMENT",
+      "task_description": null,
+      "task_manager": "Dupree, Oscar C. (Oscar)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "FLD SERV ADMIN-3",
+      "task_name": "CAPITAL EXPENSE",
+      "task_description": null,
+      "task_manager": "Dupree, Oscar C. (Oscar)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.Office Admin",
+      "labor_override": null,
+      "expense_override": 1720,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "FLD SERV ADMIN-4",
+      "task_name": "PREPAID OPEX",
+      "task_description": null,
+      "task_manager": "Dupree, Oscar C. (Oscar)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": 1451,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "FLD SERV ADMIN-5",
+      "task_name": "PROJECTS",
+      "task_description": null,
+      "task_manager": "Dupree, Oscar C. (Oscar)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "IT OPERATIONS",
+      "task_name": "IT OPERATIONS",
+      "task_description": null,
+      "task_manager": "Harmon, Matthew B. (Matt)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 1,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": [
+        "IT OPERATIONS-2",
+        "IT OPERATIONS-3",
+        "IT OPERATIONS-4",
+        "IT OPERATIONS-5.0"
+      ]
+    },
+    {
+      "task_number": "IT OPERATIONS-2",
+      "task_name": "SERVICE MANAGEMENT",
+      "task_description": null,
+      "task_manager": "Moorehead, Daniel R. (Daniel)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "BOTH",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "IT OPERATIONS-3",
+      "task_name": "CAPITAL EXPENSES",
+      "task_description": null,
+      "task_manager": "Moorehead, Daniel R. (Daniel)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.Office Admin",
+      "labor_override": null,
+      "expense_override": 1720,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "IT OPERATIONS-4",
+      "task_name": "PREPAID OPEX",
+      "task_description": null,
+      "task_manager": "Moorehead, Daniel R. (Daniel)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": 1451,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "IT OPERATIONS-5.0",
+      "task_name": "PROJECTS",
+      "task_description": null,
+      "task_manager": "Moorehead, Daniel R. (Daniel)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY",
+      "task_name": "PROD & SERV DLVRY",
+      "task_description": null,
+      "task_manager": "Harmon, Matthew B. (Matt)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 1,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": [
+        "PROD & SERV DLVRY-1",
+        "PROD & SERV DLVRY-2",
+        "PROD & SERV DLVRY-3",
+        "PROD & SERV DLVRY-4",
+        "PROD & SERV DLVRY-5"
+      ]
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1",
+      "task_name": "APP SUPPORT",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": [
+        "PROD & SERV DLVRY-1.01",
+        "PROD & SERV DLVRY-1.02",
+        "PROD & SERV DLVRY-1.03",
+        "PROD & SERV DLVRY-1.04",
+        "PROD & SERV DLVRY-1.05",
+        "PROD & SERV DLVRY-1.06",
+        "PROD & SERV DLVRY-1.07",
+        "PROD & SERV DLVRY-1.08",
+        "PROD & SERV DLVRY-1.09",
+        "PROD & SERV DLVRY-1.10",
+        "PROD & SERV DLVRY-1.11",
+        "PROD & SERV DLVRY-1.12",
+        "PROD & SERV DLVRY-1.13",
+        "PROD & SERV DLVRY-1.14"
+      ]
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.01",
+      "task_name": "AUTODESK",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.02",
+      "task_name": "BENTLEY",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.03",
+      "task_name": "ESRI",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.04",
+      "task_name": "HEXAGON",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.05",
+      "task_name": "CIVIL",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.06",
+      "task_name": "ELEC",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.07",
+      "task_name": "MECH",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.08",
+      "task_name": "STRUC",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.09",
+      "task_name": "PROCESS",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.10",
+      "task_name": "BLUEBEAM",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.11",
+      "task_name": "CRM",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.12",
+      "task_name": "ECOSYS",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.13",
+      "task_name": "DIGITAL SIGNATURES",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-1.14",
+      "task_name": "BIZ APPLICATIONS",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 3,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-2",
+      "task_name": "SERVICE MANAGEMENT",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-3",
+      "task_name": "CAPITAL EXPENSES",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.Office Admin",
+      "labor_override": null,
+      "expense_override": 1720,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-4",
+      "task_name": "PREPAID OPEX",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": 1451,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROD & SERV DLVRY-5",
+      "task_name": "PROJECTS",
+      "task_description": null,
+      "task_manager": "Good, Nathan J. (Nathan)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROPERTY & FACILITIES",
+      "task_name": "PROPERTY&FACILITIES",
+      "task_description": null,
+      "task_manager": "Harmon, Matthew B. (Matt)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 1,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": [
+        "PROPERTY & FACILITIES-2",
+        "PROPERTY & FACILITIES-3",
+        "PROPERTY & FACILITIES-4",
+        "PROPERTY & FACILITIES-5.0"
+      ]
+    },
+    {
+      "task_number": "PROPERTY & FACILITIES-2",
+      "task_name": "SERVICE MANAGEMENT",
+      "task_description": null,
+      "task_manager": "Haskin, David B. (David)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROPERTY & FACILITIES-3",
+      "task_name": "CAPITAL EXPENSES",
+      "task_description": null,
+      "task_manager": "Haskin, David B. (David)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.Office Admin",
+      "labor_override": null,
+      "expense_override": 1720,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROPERTY & FACILITIES-4",
+      "task_name": "PREPAID OPEX",
+      "task_description": null,
+      "task_manager": "Haskin, David B. (David)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": 1451,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "PROPERTY & FACILITIES-5.0",
+      "task_name": "PROJECTS",
+      "task_description": null,
+      "task_manager": "Haskin, David B. (David)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "SAFETY",
+      "task_name": "SAFETY",
+      "task_description": null,
+      "task_manager": "Harmon, Matthew B. (Matt)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 1,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": [
+        "SAFETY-2",
+        "SAFETY-3",
+        "SAFETY-4",
+        "SAFETY-5"
+      ]
+    },
+    {
+      "task_number": "SAFETY-2",
+      "task_name": "SERVICE MANAGEMENT",
+      "task_description": null,
+      "task_manager": "Haskin, David B. (David)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "SAFETY-3",
+      "task_name": "CAPITAL EXPENSES",
+      "task_description": null,
+      "task_manager": "Haskin, David B. (David)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.Office Admin",
+      "labor_override": null,
+      "expense_override": 1720,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "SAFETY-4",
+      "task_name": "PREPAID OPEX",
+      "task_description": null,
+      "task_manager": "Haskin, David B. (David)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": 1451,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "SAFETY-5",
+      "task_name": "PROJECTS",
+      "task_description": null,
+      "task_manager": "Haskin, David B. (David)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "SUPPORT",
+      "task_name": "SUPPORT",
+      "task_description": null,
+      "task_manager": "Harmon, Matthew B. (Matt)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 1,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": [
+        "SUPPORT-2",
+        "SUPPORT-3",
+        "SUPPORT-4",
+        "SUPPORT-5"
+      ]
+    },
+    {
+      "task_number": "SUPPORT-2",
+      "task_name": "SERVICE MANAGEMENT",
+      "task_description": null,
+      "task_manager": "Winkler, Nicholas A. (Nic)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "BOTH",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "SUPPORT-3",
+      "task_name": "CAPITAL EXPENSES",
+      "task_description": null,
+      "task_manager": "Winkler, Nicholas A. (Nic)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.Office Admin",
+      "labor_override": null,
+      "expense_override": 1720,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "SUPPORT-4",
+      "task_name": "PREPAID OPEX",
+      "task_description": null,
+      "task_manager": "Winkler, Nicholas A. (Nic)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": true,
+      "default": false,
+      "allowed_transaction_types": "NON-LABOR",
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": 1451,
+      "cwk_override": null,
+      "subtasks": null
+    },
+    {
+      "task_number": "SUPPORT-5",
+      "task_name": "PROJECTS",
+      "task_description": null,
+      "task_manager": "Winkler, Nicholas A. (Nic)",
+      "start_date": "2026-03-01",
+      "end_date": null,
+      "chargeable": false,
+      "default": false,
+      "allowed_transaction_types": null,
+      "level": 2,
+      "task_org": "BMC.M&S.WHQ.IT",
+      "labor_override": null,
+      "expense_override": null,
+      "cwk_override": null,
+      "subtasks": null
+    }
+  ]
+}"""
 
-    folder_name = "BillingGreenLantern/Backup"
-    print(f"\nQueue definitions in folder '{folder_name}':")
-    queue_defs = client.get_queue_definitions_by_folder_name(folder_name)
-    print(queue_defs)
+    folder_name = "ProjectsFantasticFour"
 
-    if queue_defs:
-        queue_name = queue_defs[2]["Name"]
-        print(f"\nCounting items in queue '{queue_name}'...")
-        count = client.count_queue_items(folder_name, queue_name)
-        print(f"Total items in queue '{queue_name}': {count}")
+    # Verify folder and queue exist before attempting to add
+    folder_id = client.get_folder_id_by_name(folder_name)
+    print(f"Folder '{folder_name}' ID: {folder_id}")
+    if folder_id:
+        queues = client.get_queue_definitions_by_folder_id(folder_id)
+        print(f"Queues in folder: {[q['Name'] for q in queues]}")
+
+    client.add_queue_item(
+        folder_name=folder_name,
+        queue_name="ACCTG_PC_IndirectProjectSetup",
+        specific_content=json.loads(json_data),
+        priority="High",
+        reference="TestReference",
+    )
